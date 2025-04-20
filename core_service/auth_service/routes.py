@@ -21,6 +21,21 @@ def get_db():
     finally:
         db.close()
 
+# Retorna o usuário logado a partir do token
+def get_current_user(token: str = Depends(utils.oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, utils.SECRET_KEY, algorithms=[utils.ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuário não encontrado")
+    return user
+
 # Rota POST /register – registra um novo usuário
 @router.post("/register", response_model=schemas.UserOut)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -37,14 +52,12 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
     # Salva o usuário no banco
     db.add(new_user)
-    db.flush()
-    wallet = models.Wallet(user_id=new_user.id, saldo=0.0)
-    db.add(wallet)
-
     db.commit()
     db.refresh(new_user)
 
-    # Retorna os dados do novo usuário (sem senha)
+    # Registra log de criação de usuário
+    utils.registrar_log("registro", f"email={new_user.email}", usuario_id=new_user.id)
+
     return new_user
 
 # Rota POST /login – faz login e retorna o token JWT
@@ -55,34 +68,17 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
     # Verifica se o usuário existe e se a senha está correta
     if not user or not utils.verify_password(form_data.password, user.hashed_password):
+        utils.registrar_log("login_falhou", f"username={form_data.username}")
         raise HTTPException(status_code=401, detail="Credenciais inválidas")
     
     # Gera o token JWT com o nome do usuário como "sub" (subject)
     access_token = utils.create_access_token(data={"sub": user.username})
 
+    # Loga o login bem-sucedido
+    utils.registrar_log("login_sucesso", f"username={user.username}", usuario_id=user.id)
+
     # Retorna o token de acesso
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, utils.SECRET_KEY, algorithms=[utils.ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
-    except JWTError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
-
-    user = db.query(User).filter(User.username == username).first()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuário não encontrado")
-    return user
-
-@router.get("/wallet/me")
-def get_my_wallet(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    wallet = db.query(models.Wallet).filter(models.Wallet.user_id == current_user.id).first()
-    if wallet is None:
-        raise HTTPException(status_code=404, detail="Carteira não encontrada")
-    return {"saldo": wallet.saldo}
